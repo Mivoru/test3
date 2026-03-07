@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="cs" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OSINT Target Analyzer</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        terminal: {
+                            bg: '#0a0a0a',
+                            panel: '#121212',
+                            border: '#333333',
+                            green: '#00ff41',
+                            text: '#e0e0e0',
+                            dim: '#888888',
+                            accent: '#3b82f6',
+                            danger: '#ef4444',
+                        }
+                    },
+                    fontFamily: {
+                        mono: ['"Fira Code"', 'Consolas', 'Monaco', 'monospace'],
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            background-color: theme('colors.terminal.bg');
+            color: theme('colors.terminal.text');
+            font-family: theme('fontFamily.mono');
+        }
+        .crt-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            background-size: 100% 2px, 3px 100%;
+            pointer-events: none;
+            z-index: 50;
+            opacity: 0.15;
+        }
+        .glow-text {
+            text-shadow: 0 0 5px theme('colors.terminal.green');
+        }
+        .map-container {
+            height: 300px;
+            width: 100%;
+            background-color: theme('colors.terminal.panel');
+            border: 1px solid theme('colors.terminal.border');
+        }
+        #leaflet-map {
+            height: 100%;
+            width: 100%;
+            filter: grayscale(100%) invert(100%) hue-rotate(180deg) contrast(1.5);
+            /* Dark map hack */
+        }
+        canvas.ela-canvas {
+            width: 100%;
+            max-height: 300px;
+            object-fit: contain;
+            background-color: #000;
+        }
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: theme('colors.terminal.bg'); }
+        ::-webkit-scrollbar-thumb { background: theme('colors.terminal.border'); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: theme('colors.terminal.dim'); }
+
+        .hidden-el { display: none !important; }
+    </style>
+</head>
+<body class="antialiased min-h-screen flex flex-col pt-4 px-4 pb-12">
+    <div class="crt-overlay"></div>
+
+    <header class="mb-6 border-b border-terminal-border pb-4 flex justify-between items-center">
+        <div class="flex items-center gap-3">
+            <svg class="w-8 h-8 text-terminal-green" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path>
+            </svg>
+            <div>
+                <h1 class="text-2xl font-bold glow-text text-terminal-green tracking-wider">OSINT.AUTO_ANALYZER</h1>
+                <p class="text-xs text-terminal-dim">v2.1.0-alpha // SYSTEM: ONLINE</p>
+            </div>
+        </div>
+        <div>
+            <span id="connection-status" class="px-2 py-1 text-xs border border-terminal-border rounded text-terminal-dim">
+                WS: DISCONNECTED
+            </span>
+        </div>
+    </header>
+
+    <main class="flex-grow flex flex-col lg:flex-row gap-6">
+        
+        <!-- Levý panel: Upload & Status -->
+        <aside class="w-full lg:w-1/3 flex flex-col gap-6">
+            
+            <!-- Upload Zóna -->
+            <section class="bg-terminal-panel border border-terminal-border p-5 rounded-lg">
+                <h2 class="text-sm font-semibold text-terminal-dim mb-4 uppercase tracking-wider flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+                    Data Input Stream
+                </h2>
+                
+                <div id="drop-zone" class="border-2 border-dashed border-terminal-border rounded flex flex-col items-center justify-center p-8 cursor-pointer transition-colors hover:border-terminal-green hover:bg-terminal-border/20 group relative overflow-hidden">
+                    <input type="file" id="file-input" class="absolute inset-0 w-full h-full opacity-0 cursor-pointer" accept=".jpg,.jpeg,.png,.tiff" />
+                    
+                    <svg class="w-10 h-10 text-terminal-dim group-hover:text-terminal-green mb-3 transition-colors" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"></path></svg>
+                    
+                    <p class="text-sm text-center font-medium group-hover:text-terminal-text">Drag & Drop visual target</p>
+                    <p class="text-xs text-terminal-dim mt-2 text-center">Supported: JPG, PNG, TIFF<br>Max size: 20MB</p>
+                </div>
+                
+                <div id="upload-error" class="hidden-el text-terminal-danger text-xs mt-3 flex items-start gap-1">
+                    <svg class="w-4 h-4 inline-block flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    <span id="upload-error-text">Invalid file format.</span>
+                </div>
+
+                <!-- Progress Bar -->
+                <div id="progress-container" class="hidden-el mt-6">
+                    <div class="flex justify-between text-xs mb-1">
+                        <span id="current-task-status" class="text-terminal-green drop-shadow-sm">INITIATING...</span>
+                        <span id="current-task-percent" class="text-terminal-dim">0%</span>
+                    </div>
+                    <div class="w-full bg-terminal-border h-2 rounded overflow-hidden">
+                        <div id="progress-bar" class="bg-terminal-green h-full w-0 transition-all duration-300 relative">
+                            <div class="absolute inset-0 bg-white/20 animate-pulse"></div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Akce (Download PDF) -->
+                <div id="action-container" class="hidden-el mt-6 pt-4 border-t border-terminal-border">
+                    <a id="download-report-btn" href="#" class="w-full flex items-center justify-center gap-2 bg-terminal-border hover:bg-terminal-dim text-white text-sm py-2 px-4 rounded transition-colors disabled:opacity-50">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+                        Download Session Report (PDF)
+                    </a>
+                </div>
+            </section>
+            
+            <!-- Summary Chart -->
+            <section class="bg-terminal-panel border border-terminal-border p-5 rounded-lg flex-grow">
+                <h2 class="text-sm font-semibold text-terminal-dim mb-4 uppercase tracking-wider flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z"></path></svg>
+                    Confidence Overview
+                </h2>
+                <div class="relative h-48 w-full flex items-center justify-center">
+                    <p id="chart-placeholder" class="text-xs text-terminal-dim absolute">Awaiting Data...</p>
+                    <canvas id="confidenceChart" class="hidden-el"></canvas>
+                </div>
+                
+                <div id="synthesis-verdict" class="hidden-el mt-4 p-3 bg-terminal-bg border border-terminal-border rounded">
+                    <div class="text-xs text-terminal-dim mb-1">Final Verdict:</div>
+                    <div id="verdict-text" class="text-lg font-bold">--</div>
+                    <ul id="verdict-notes" class="mt-2 space-y-1 text-xs text-terminal-dim list-disc list-inside">
+                        <!-- Notes -->
+                    </ul>
+                </div>
+            </section>
+        </aside>
+
+        <!-- Pravý modulární panel (Výsledky) -->
+        <div class="w-full lg:w-2/3 flex flex-col gap-6" id="results-modules">
+            
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <!-- Forenzní data -->
+                <section class="bg-terminal-panel border border-terminal-border p-5 rounded-lg relative overflow-hidden group">
+                    <div class="absolute top-0 right-0 p-2 opacity-10 group-hover:opacity-20 transition-opacity">
+                        <svg class="w-16 h-16" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M10 2a8 8 0 100 16 8 8 0 000-16zM8 11a1 1 0 100-2 1 1 0 000 2zm4 0a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd"></path></svg>
+                    </div>
+                    <h2 class="text-sm font-semibold text-terminal-accent mb-4 uppercase tracking-wider flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 21h7a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v11m0 5l4.879-4.879m0 0a3 3 0 104.243-4.242 3 3 0 00-4.243 4.242z"></path></svg>
+                        Forensic Data
+                    </h2>
+                    <ul id="forens-list" class="space-y-2 text-sm font-mono text-terminal-dim">
+                        <li>> Awaiting stream...</li>
+                    </ul>
+                </section>
+
+                <!-- Identifikované entity -->
+                <section class="bg-terminal-panel border border-terminal-border p-5 rounded-lg">
+                    <h2 class="text-sm font-semibold text-terminal-text mb-4 uppercase tracking-wider flex items-center gap-2">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path></svg>
+                        Entities & Objects
+                    </h2>
+                    <div id="entity-list" class="space-y-3 text-sm flex flex-col gap-2">
+                        <div class="text-terminal-dim font-mono">> Awaiting object detection...</div>
+                    </div>
+                </section>
+            </div>
+
+            <!-- Geolokace -->
+            <section class="bg-terminal-panel border border-terminal-border p-5 rounded-lg">
+                <h2 class="text-sm font-semibold text-terminal-text mb-4 uppercase tracking-wider flex items-center gap-2 flex-grow">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    Geospatial Model
+                </h2>
+                <div class="flex flex-col xl:flex-row gap-4">
+                    <div class="w-full xl:w-2/3 map-container relative rounded overflow-hidden">
+                        <div id="map-placeholder" class="absolute inset-0 flex items-center justify-center text-xs text-terminal-dim z-10 bg-terminal-panel">
+                            MAP DATA: OFFLINE
+                        </div>
+                        <div id="leaflet-map"></div>
+                    </div>
+                    <div class="w-full xl:w-1/3 text-xs">
+                        <div class="text-terminal-dim mb-2 uppercase border-b border-terminal-border pb-1">Telemetry</div>
+                        <ul id="geo-telemetry" class="space-y-2 font-mono">
+                            <li>LAT: --</li>
+                            <li>LON: --</li>
+                            <li>GEO_MATCH: <span class="text-terminal-dim">Pending</span></li>
+                        </ul>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Analýza integrity (ELA) -->
+            <section class="bg-terminal-panel border border-terminal-border p-5 rounded-lg">
+                <h2 class="text-sm font-semibold text-terminal-danger mb-4 uppercase tracking-wider flex items-center gap-2">
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+                    Integrity Analysis (ELA)
+                </h2>
+                <div class="w-full flex justify-center bg-[#050505] rounded border border-terminal-border p-2">
+                    <p id="ela-placeholder" class="text-xs text-terminal-dim py-12">No Error Level Analysis data available.</p>
+                    <canvas id="elaCanvas" class="ela-canvas hidden-el"></canvas>
+                </div>
+                <div id="ela-stats" class="mt-3 text-xs font-mono text-terminal-dim hidden-el flex gap-4">
+                    <span>MAX_ERR: <span id="ela-max" class="text-terminal-text">--</span></span>
+                    <span>SUSPICIOUS: <span id="ela-sus" class="text-terminal-danger">--</span></span>
+                </div>
+            </section>
+
+        </div>
+    </main>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+    <!-- App Logic -->
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
