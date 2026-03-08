@@ -11,3 +11,4 @@ scipy
 pydantic
 piexif
 python-dotenv
+reportlab

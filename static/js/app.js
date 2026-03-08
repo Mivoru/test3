@@ -264,9 +264,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Environment
         if (data.environment) {
-            if (data.environment.shadow_analysis && data.environment.shadow_analysis.candidate_locations.length > 0) {
+            let locationFound = false;
+            
+            // First priority: Shadow analysis locations
+            if (data.environment.shadow_analysis && data.environment.shadow_analysis.candidate_locations && data.environment.shadow_analysis.candidate_locations.length > 0) {
                 const loc = data.environment.shadow_analysis.candidate_locations[0];
                 initMap(loc.latitude, loc.longitude, 8);
+                locationFound = true;
                 
                 let teleHtml = `<li>LAT: <span class="text-terminal-text">${loc.latitude.toFixed(4)}</span></li>`;
                 teleHtml += `<li>LON: <span class="text-terminal-text">${loc.longitude.toFixed(4)}</span></li>`;
@@ -284,21 +288,70 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
 
+        // Check for synthesis location (fallback)
+        if (data.synthesis && data.synthesis.final_location && !locationFound) {
+            const loc = data.synthesis.final_location;
+            initMap(loc.latitude, loc.longitude, 8);
+            locationFound = true;
+            
+            let teleHtml = `<li>LAT: <span class="text-terminal-text">${loc.latitude.toFixed(4)}</span></li>`;
+            teleHtml += `<li>LON: <span class="text-terminal-text">${loc.longitude.toFixed(4)}</span></li>`;
+            teleHtml += `<li>GEO_SOURCE: <span class="text-terminal-green">SYNTHESIS</span></li>`;
+            typeText(geoTele, teleHtml);
+        }
+
+        // Check for EXIF GPS location (another fallback)
+        if (data.forensic && data.forensic.metadata && data.forensic.metadata.gps && !locationFound) {
+            const gps = data.forensic.metadata.gps;
+            initMap(gps.latitude, gps.longitude, 8);
+            locationFound = true;
+            
+            let teleHtml = `<li>LAT: <span class="text-terminal-text">${gps.latitude.toFixed(4)}</span></li>`;
+            teleHtml += `<li>LON: <span class="text-terminal-text">${gps.longitude.toFixed(4)}</span></li>`;
+            teleHtml += `<li>GEO_SOURCE: <span class="text-terminal-green">EXIF GPS</span></li>`;
+            typeText(geoTele, teleHtml);
+        }
+
         // Entities
         if (data.entities) {
             let entHtml = '';
             if(data.entities.persons && data.entities.persons.length > 0) {
                 data.entities.persons.forEach(p => {
-                    entHtml += `<div class="flex justify-between items-center border border-terminal-border p-2 rounded">
+                    entHtml += `<div class="flex justify-between items-center border border-terminal-border p-2 rounded mb-2">
                         <span>> ${p.description}</span>
                         <span class="text-xs text-terminal-green">${(p.confidence*100).toFixed(0)}%</span>
                     </div>`;
                 });
             }
             if(data.entities.objects && data.entities.objects.length > 0) {
-                entHtml += `<div class="text-xs text-terminal-dim mt-2">OBJECTS: ${data.entities.objects.join(', ')}</div>`;
+                entHtml += '<div class="text-xs text-terminal-dim mt-2 mb-2">DETECTED OBJECTS:</div>';
+                data.entities.objects.forEach(obj => {
+                    // Split category and description
+                    const colonIndex = obj.indexOf(':');
+                    if (colonIndex > 0) {
+                        const category = obj.substring(0, colonIndex);
+                        const description = obj.substring(colonIndex + 1).trim();
+                        entHtml += `<div class="text-xs p-1 rounded mb-1" style="background: rgba(0,255,65,0.1); border-left: 2px solid #00ff41;">
+                            <span class="text-terminal-green font-semibold">${category}:</span> ${description}
+                        </div>`;
+                    } else {
+                        entHtml += `<div class="text-xs p-1 rounded mb-1" style="background: rgba(0,255,65,0.1);">
+                            ${obj}
+                        </div>`;
+                    }
+                });
             }
-            if(entHtml) typeText(entityList, entHtml);
+            if(data.entities.texts && data.entities.texts.length > 0) {
+                entHtml += '<div class="text-xs text-terminal-dim mt-2">DETECTED TEXT:</div>';
+                data.entities.texts.forEach(text => {
+                    entHtml += `<div class="text-xs font-mono p-1 rounded mb-1" style="background: rgba(59,130,246,0.1);">${text}</div>`;
+                });
+            }
+            if(entHtml) {
+                typeText(entityList, entHtml);
+            } else {
+                typeText(entityList, '<div class="text-terminal-dim font-mono">> No entities detected</div>');
+            }
             confChart.data.datasets[0].data[4] = 0.92;
             updateChartVis();
         }
@@ -311,6 +364,18 @@ document.addEventListener('DOMContentLoaded', () => {
             
             if (data.synthesis.reliability_notes) {
                 vNotes.innerHTML = data.synthesis.reliability_notes.map(n => `<li>${n}</li>`).join('');
+            }
+
+            // If no location found but synthesis has location hints, show them
+            if (!locationFound && data.synthesis.reliability_notes) {
+                const locationHints = data.synthesis.reliability_notes.filter(note => 
+                    note.includes('Poloha odhadnuta') || note.includes('GEO_SOURCE')
+                );
+                if (locationHints.length > 0) {
+                    let teleHtml = '<li>LOCATION: <span class="text-terminal-dim">ESTIMATED</span></li>';
+                    teleHtml += `<li>HINTS: <span class="text-terminal-green">${locationHints.join('; ')}</span></li>`;
+                    typeText(geoTele, teleHtml);
+                }
             }
         }
 

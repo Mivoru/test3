@@ -117,9 +117,8 @@ class SynthesisEngine:
                 reliability_notes.append("Poloha určena ze stínů, chybí EXIF GPS.")
 
         # Porovnání EXIF GPS a Google Vision Landmark Detection (> 500m)
-        if forensic.metadata and forensic.metadata.gps and entities.objects:
-            exif_lat = forensic.metadata.gps.latitude
-            exif_lon = forensic.metadata.gps.longitude
+        landmark_locations = []
+        if entities.objects:
             for obj_str in entities.objects:
                 if "Stavba/Landmark:" in obj_str and "[Lat:" in obj_str:
                     try:
@@ -127,15 +126,42 @@ class SynthesisEngine:
                         lat_str, lng_str = parts.split(",")
                         v_lat = float(lat_str.strip())
                         v_lng = float(lng_str.replace("Lng:", "").strip())
-                        
-                        v_dist = self._haversine_distance(exif_lat, exif_lon, v_lat, v_lng)
-                        if v_dist > 0.5: # 500 metrů = 0.5 km
-                            inconsistencies.append(f"Critical: GPS metadata inconsistent with visual evidence (Landmarks). Distance {v_dist*1000:.0f}m.")
-                            score = score - 0.4
+                        landmark_locations.append((v_lat, v_lng, obj_str))
                     except Exception as e:
                         logger.warning(f"Chyba pri parsovani souradnic z objektu: {e}")
 
-        # ---------------- 5. Time Synthesis ----------------
+        # Use landmark location if no EXIF GPS available
+        if not has_exif_gps and landmark_locations:
+            # Take the first landmark location as candidate
+            lm_lat, lm_lon, lm_desc = landmark_locations[0]
+            final_loc = CandidateLocation(
+                latitude=lm_lat,
+                longitude=lm_lon,
+                predicted_elevation_deg=0.0,
+                predicted_azimuth_deg=0.0,
+                elevation_error_deg=0.0
+            )
+            reliability_notes.append(f"Poloha určena z landmark detekce: {lm_desc.split(' [')[0]}")
+
+        # Cross-validate EXIF GPS with landmark locations
+        if has_exif_gps and landmark_locations:
+            exif_lat = forensic.metadata.gps.latitude
+            exif_lon = forensic.metadata.gps.longitude
+            
+            for lm_lat, lm_lon, lm_desc in landmark_locations:
+                v_dist = self._haversine_distance(exif_lat, exif_lon, lm_lat, lm_lon)
+                if v_dist > 0.5: # 500 metrů = 0.5 km
+                    inconsistencies.append(f"Critical: GPS metadata inconsistent with visual evidence (Landmarks). Distance {v_dist*1000:.0f}m.")
+                    score = score - 0.4
+                else:
+                    reliability_notes.append(f"EXIF GPS potvrzeno landmark detekcí: {lm_desc.split(' [')[0]}")
+
+        # If still no location, try to estimate from visual/environmental clues
+        if not final_loc:
+            location_hints = self._estimate_location_from_clues(forensic, environment, entities)
+            if location_hints:
+                reliability_notes.append(f"Poloha odhadnuta z vizuálních indicií: {', '.join(location_hints)}")
+                # Could set a default location based on common patterns, but for now just note it
         final_time = None
         if forensic.metadata and forensic.metadata.datetime_original:
             final_time = forensic.metadata.datetime_original
@@ -151,6 +177,50 @@ class SynthesisEngine:
             data_availability_index=data_availability_index,
             inconsistencies=inconsistencies,
             final_location=final_loc,
-            final_time=final_time,
             reliability_notes=reliability_notes
         )
+
+    def _estimate_location_from_clues(self, forensic, environment, entities) -> List[str]:
+        """
+        Odhadne polohu na základě vizuálních a environmentálních indicií.
+        """
+        hints = []
+        
+        # Check vegetation patterns
+        vegetation_indicators = []
+        if entities.objects:
+            for obj in entities.objects:
+                if "Rostlina/Příroda:" in obj:
+                    vegetation_indicators.append(obj.replace("Rostlina/Příroda: ", ""))
+        
+        if vegetation_indicators:
+            hints.append(f"Vegetace: {', '.join(vegetation_indicators[:3])}")
+        
+        # Check sky/weather patterns
+        if environment.sky_analysis:
+            sky_class = environment.sky_analysis.sky_classification
+            if sky_class == "clear":
+                hints.append("Jasná obloha - pravděpodobně venkovská oblast")
+            elif sky_class == "overcast":
+                hints.append("Zataženo - pravděpodobně mírné podnebí")
+        
+        # Check for urban vs rural indicators
+        urban_indicators = []
+        rural_indicators = []
+        
+        if entities.objects:
+            for obj in entities.objects:
+                obj_lower = obj.lower()
+                if any(word in obj_lower for word in ["car", "building", "street", "traffic"]):
+                    urban_indicators.append("městské prostředí")
+                elif any(word in obj_lower for word in ["tree", "grass", "mountain", "forest"]):
+                    rural_indicators.append("venkovské prostředí")
+        
+        if urban_indicators and not rural_indicators:
+            hints.append("Městské prostředí")
+        elif rural_indicators and not urban_indicators:
+            hints.append("Venkovské/venkovní prostředí")
+        elif urban_indicators and rural_indicators:
+            hints.append("Smíšené prostředí (město-venkov)")
+        
+        return hints

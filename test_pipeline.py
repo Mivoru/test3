@@ -11,6 +11,10 @@ if os.path.exists(".env"):
                 env_key, env_val = env_line.split("=", 1)
                 os.environ[env_key.strip()] = env_val.strip()
 
+# Clear API keys for testing offline functionality
+for key in ['OPENWEATHER_API_KEY', 'GOOGLE_VISION_API_KEY', 'SERPER_API_KEY', 'SERP_API_KEY']:
+    os.environ.pop(key, None)
+
 from PIL import Image
 
 def run_tests():

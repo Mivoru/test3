@@ -83,7 +83,8 @@ class EntityAnalyzer:
 
         if not api_key:
             logger.warning("GOOGLE_VISION_API_KEY is not set.")
-            return self.analyze_entities(raw_persons, raw_objects, raw_texts)
+            # Try offline fallback detection
+            return self._offline_entity_detection(image_path)
 
         try:
             with open(image_path, "rb") as f:
@@ -99,7 +100,8 @@ class EntityAnalyzer:
                     "image": {"content": image_b64},
                     "features": [
                         {"type": "LANDMARK_DETECTION", "maxResults": 10},
-                        {"type": "OBJECT_LOCALIZATION", "maxResults": 10}
+                        {"type": "OBJECT_LOCALIZATION", "maxResults": 15},  # Increased for more objects
+                        {"type": "LABEL_DETECTION", "maxResults": 20}     # Add label detection for better descriptions
                     ]
                 }
             ]
@@ -129,7 +131,7 @@ class EntityAnalyzer:
 
                 raw_objects.append(f"Stavba/Landmark: {desc}{loc_str}")
 
-            # 2. Object Localization (detekce zvirat, techniky atd.)
+            # 2. Object Localization (detekce zvirat, techniky, rostlin atd.)
             objects = responses.get("localizedObjectAnnotations", [])
             for obj in objects:
                 name = obj.get("name", "Neznamy objekt")
@@ -142,8 +144,27 @@ class EntityAnalyzer:
                         "confidence": conf
                     })
                 else:
-                    if name not in raw_objects:
-                        raw_objects.append(name)
+                    # Enhanced object descriptions
+                    obj_desc = self._enhance_object_description(name, conf)
+                    if obj_desc not in raw_objects:
+                        raw_objects.append(obj_desc)
+
+            # 3. Label Detection (pro doplneni informaci o rostlinach, prostredí atd.)
+            labels = responses.get("labelAnnotations", [])
+            vegetation_labels = []
+            for label in labels:
+                desc = label.get("description", "").lower()
+                conf = label.get("score", 0.0)
+                
+                # Collect vegetation-related labels
+                if any(keyword in desc for keyword in ["plant", "tree", "flower", "grass", "bush", "vegetation", "forest", "wood", "leaf", "garden"]):
+                    if conf > 0.5:  # Only high confidence vegetation labels
+                        vegetation_labels.append(f"Rostlina/Příroda: {label.get('description', 'Neznámá rostlina')}")
+
+            # Add unique vegetation labels
+            for veg_label in vegetation_labels[:5]:  # Limit to top 5
+                if veg_label not in raw_objects:
+                    raw_objects.append(veg_label)
 
         except requests.RequestException as exc:
             if exc.response is not None and exc.response.status_code in (401, 403):
@@ -153,7 +174,133 @@ class EntityAnalyzer:
                 res.reason = "API_KEY_ERROR"
                 return res
             logger.error(f"Google Vision API Error: {exc}")
+            res = self.analyze_entities(raw_persons, raw_objects, raw_texts)
+            res.status = "skipped"
+            res.reason = "API_ERROR"
+            return res
         except Exception as exc:
             logger.error(f"Google Vision API Error: {exc}")
+            res = self.analyze_entities(raw_persons, raw_objects, raw_texts)
+            res.status = "skipped"
+            res.reason = "UNKNOWN_ERROR"
+            return res
 
-        return self.analyze_entities(raw_persons, raw_objects, raw_texts)
+    def _offline_entity_detection(self, image_path: str) -> EntityAnalyzeResult:
+        """
+        Offline entity detection using basic OpenCV techniques when API is unavailable.
+        """
+        try:
+            # Load image
+            img = cv2.imread(image_path)
+            if img is None:
+                result = self.analyze_entities([], [], [])
+                result.status = "skipped"
+                result.reason = "IMAGE_LOAD_ERROR"
+                return result
+            
+            height, width = img.shape[:2]
+            raw_objects = []
+            
+            # Basic color analysis for vegetation detection
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+            
+            # Green color range for vegetation (more inclusive)
+            lower_green = np.array([25, 40, 40])
+            upper_green = np.array([90, 255, 255])
+            green_mask = cv2.inRange(hsv, lower_green, upper_green)
+            green_ratio = np.sum(green_mask > 0) / (height * width)
+            
+            # Brown/earth color range
+            lower_brown = np.array([5, 30, 30])
+            upper_brown = np.array([25, 255, 200])
+            brown_mask = cv2.inRange(hsv, lower_brown, upper_brown)
+            brown_ratio = np.sum(brown_mask > 0) / (height * width)
+            
+            # Blue color range for sky/water
+            lower_blue = np.array([85, 30, 30])
+            upper_blue = np.array([135, 255, 255])
+            blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
+            blue_ratio = np.sum(blue_mask > 0) / (height * width)
+            
+            # Analyze dominant colors and patterns
+            if green_ratio > 0.05:  # Lower threshold for vegetation
+                if green_ratio > 0.15:
+                    raw_objects.append("Rostlina/Příroda: Bohatá vegetace/zelené prostředí (vysoká jistota)")
+                elif green_ratio > 0.10:
+                    raw_objects.append("Rostlina/Příroda: Vegetace přítomna (střední jistota)")
+                else:
+                    raw_objects.append("Rostlina/Příroda: Možná vegetace (nízká jistota)")
+            
+            if blue_ratio > 0.10:  # Lower threshold for sky/water
+                if blue_ratio > 0.25:
+                    raw_objects.append("Prostředí: Dominantní modré prvky - obloha/voda (vysoká jistota)")
+                else:
+                    raw_objects.append("Prostředí: Modré prvky přítomny - obloha/voda (střední jistota)")
+            
+            if brown_ratio > 0.05:
+                raw_objects.append("Prostředí: Hnědé prvky - země/kámen přítomny")
+            
+            # Edge analysis for structural complexity
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            edges = cv2.Canny(gray, 50, 150)  # More sensitive edge detection
+            edge_ratio = np.sum(edges > 0) / (height * width)
+            
+            if edge_ratio > 0.02:  # Lower threshold
+                if edge_ratio > 0.10:
+                    raw_objects.append("Prostředí: Vysoce strukturované prostředí (budovy/město/les)")
+                elif edge_ratio > 0.05:
+                    raw_objects.append("Prostředí: Středně strukturované prostředí")
+                else:
+                    raw_objects.append("Prostředí: Mírně strukturované prostředí")
+            
+            # Brightness analysis
+            brightness = np.mean(gray)
+            if brightness < 50:
+                raw_objects.append("Prostředí: Tmavé prostředí (noc/interiér)")
+            elif brightness > 200:
+                raw_objects.append("Prostředí: Velmi světlé prostředí (sníh/jasné světlo)")
+            
+            result = self.analyze_entities([], raw_objects, [])
+            result.status = "offline_fallback"
+            result.reason = "API_UNAVAILABLE"
+            return result
+            
+        except Exception as e:
+            logger.error(f"Offline entity detection failed: {e}")
+            result = self.analyze_entities([], [], [])
+            result.status = "skipped"
+            result.reason = "OFFLINE_ERROR"
+            return result
+
+    def _enhance_object_description(self, name: str, confidence: float) -> str:
+        """
+        Vytvoří detailnější popis objektu na základě jeho typu a spolehlivosti.
+        """
+        name_lower = name.lower()
+        
+        # Categorize objects
+        if any(keyword in name_lower for keyword in ["car", "vehicle", "truck", "bus", "motorcycle", "bicycle"]):
+            category = "Doprava"
+        elif any(keyword in name_lower for keyword in ["building", "house", "tower", "bridge", "church", "castle"]):
+            category = "Stavba"
+        elif any(keyword in name_lower for keyword in ["tree", "plant", "flower", "bush", "grass"]):
+            category = "Rostlina/Příroda"
+        elif any(keyword in name_lower for keyword in ["animal", "dog", "cat", "bird", "horse", "cow"]):
+            category = "Živočich"
+        elif any(keyword in name_lower for keyword in ["chair", "table", "furniture", "sofa", "bed"]):
+            category = "Nábytek"
+        elif any(keyword in name_lower for keyword in ["phone", "computer", "laptop", "device", "electronics"]):
+            category = "Elektronika"
+        else:
+            category = "Objekt"
+        
+        # Add confidence indicator
+        conf_text = ""
+        if confidence > 0.9:
+            conf_text = " (vysoká jistota)"
+        elif confidence > 0.7:
+            conf_text = " (střední jistota)"
+        elif confidence < 0.5:
+            conf_text = " (nízká jistota)"
+        
+        return f"{category}: {name}{conf_text}"

@@ -202,7 +202,14 @@ async def run_analysis_pipeline(task_id: str, file_path: str):
             print(f"Chyba při generování reportu: {report_err}")
             report_url = None
         
-        await pm.update("Analýza dokončena", 100, {"report_url": report_url, "complete": True})
+        await pm.update("Analýza dokončena", 100, {
+            "report_url": report_url, 
+            "complete": True,
+            "forensic": forensic_data,
+            "environment": environment_data,
+            "entities": entity_data,
+            "synthesis": synthesis_data
+        })
         
     except Exception as e:
         await pm.update(f"Chyba při analýze: {str(e)}", -1)
