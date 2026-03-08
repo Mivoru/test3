@@ -5,14 +5,14 @@ import json
 import time
 import tempfile
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, Dict, List
 
 import exifread
 import numpy as np
 from PIL import Image
 import cv2
 
-from modules.schemas import (
+from .schemas import (
     MetadataResult, GPSData, SuspiciousRegion, BBox, ELAResult, AIGenResult,
     FileInfo, FullForensicReport
 )
@@ -39,10 +39,7 @@ class ForensicAnalyzer:
         self.filename: str = os.path.basename(image_path)
 
         # Output directory for ELA artefacts
-        self._ela_output_dir = os.path.join(
-            os.path.dirname(os.path.dirname(self.image_path)),
-            "data", "ela_output",
-        )
+        self._ela_output_dir = "static/ela_output"
         os.makedirs(self._ela_output_dir, exist_ok=True)
 
     # ============================================================
@@ -55,6 +52,9 @@ class ForensicAnalyzer:
         """
         with open(self.image_path, "rb") as f:
             tags = exifread.process_file(f, details=False)
+
+        if not tags:
+            return MetadataResult(status="no_metadata")
 
         # Build dict first
         gps_data = self._extract_gps(tags)
@@ -84,16 +84,16 @@ class ForensicAnalyzer:
         decimal = d + m / 60.0 + s / 3600.0
         if ref in ("S", "W"):
             decimal = -decimal
-        return round(decimal, 7)
+        return round(float(decimal), 7)
 
-    def _extract_gps(self, tags: dict) -> dict[str, float] | None:
+    def _extract_gps(self, tags: dict) -> Optional[Dict[str, float]]:
         """Vrátí {latitude, longitude} nebo None, pokud GPS data neexistují."""
         lat_tag = tags.get("GPS GPSLatitude")
         lat_ref = tags.get("GPS GPSLatitudeRef")
         lon_tag = tags.get("GPS GPSLongitude")
         lon_ref = tags.get("GPS GPSLongitudeRef")
 
-        if not all([lat_tag, lat_ref, lon_tag, lon_ref]):
+        if not lat_tag or not lat_ref or not lon_tag or not lon_ref:
             return None
 
         try:
@@ -109,7 +109,7 @@ class ForensicAnalyzer:
             return None
 
     @staticmethod
-    def _tag_str(tags: dict, key: str) -> str | None:
+    def _tag_str(tags: dict, key: str) -> Optional[str]:
         """Bezpečně vrátí stringovou hodnotu EXIF tagu."""
         tag = tags.get(key)
         return str(tag) if tag else None
@@ -119,44 +119,43 @@ class ForensicAnalyzer:
     # ============================================================
     def error_level_analysis(self, quality: int = 95, max_dim: int = 2000) -> ELAResult:
         """
-        Provede ELA, s omezením velikosti snýmku (max_dim) pro rychlost:
-          1. Uloží dočasný JPEG s danou kvalitou.
-          2. Porovná s originálem (absolutní pixel-diff).
-          3. Identifikuje oblasti s vysokým rozdílem (potenciální manipulace).
+        Provede ELA korektně:
+          1. Načte originál v plné kvalitě.
+          2. Uloží dočasný JPEG s danou kvalitou.
+          3. Načte JPEG zpět.
+          4. Vykalkuluje absdiff na obrázcích stejné velikosti.
+          5. Až poton normalizuje a případně zmenší výsledek pro zobrazení/analýzu.
         """
-        # -- Načti originál přes PIL a re-uložení jako JPEG ----------------
-        original_pil = Image.open(self.image_path).convert("RGB")
-        
-        # Optimize size
-        orig_w, orig_h = original_pil.size
-        scale = 1.0
-        if max(orig_w, orig_h) > max_dim:
-            scale = max_dim / max(orig_w, orig_h)
-            new_w, new_h = int(orig_w * scale), int(orig_h * scale)
-            original_pil = original_pil.resize((new_w, new_h), Image.Resampling.LANCZOS)
-            
+        # -- Načti originál přes OpenCV pro zachování pixelové přesnosti --
+        original_cv_full = cv2.imread(self.image_path)
+        if original_cv_full is None:
+            raise ValueError("Failed to load original image via OpenCV")
+
+        # Vytvoř dočasný soubor přes cv2 imwrite (JPEG komprese)
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".jpg")
         os.close(tmp_fd)
         try:
-            original_pil.save(tmp_path, "JPEG", quality=quality)
+            cv2.imwrite(tmp_path, original_cv_full, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
 
-            # -- Načti oba obrázky přes cv2 --------------------------------
-            # If resized, we need original_cv to match the resized PIL image, so just convert the resized PIL to cv2
-            original_cv = cv2.cvtColor(np.array(original_pil), cv2.COLOR_RGB2BGR)
-            resaved_cv = cv2.imread(tmp_path)
+            # -- Načti JPEG zpět --------------------------------------------
+            resaved_cv_full = cv2.imread(tmp_path)
+            if resaved_cv_full is None:
+                raise ValueError("Failed to load resaved JPEG")
 
-            if original_cv is None or resaved_cv is None:
-                raise ValueError("Failed to load images via OpenCV")
+            # -- Absolutní rozdíl na plném rozlišení -------------------------
+            diff_full = cv2.absdiff(original_cv_full, resaved_cv_full)
+            
+            # Zmenšení pro zpracování a zobrazení, pokud je potřeba
+            orig_h, orig_w = diff_full.shape[:2]
+            scale = 1.0
+            if max(orig_h, orig_w) > max_dim:
+                scale = max_dim / max(orig_h, orig_w)
+                new_w, new_h = int(orig_w * scale), int(orig_h * scale)
+                diff = cv2.resize(diff_full, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            else:
+                diff = diff_full
 
-            # Ensure matching dimensions
-            if original_cv.shape != resaved_cv.shape:
-                resaved_cv = cv2.resize(
-                    resaved_cv,
-                    (original_cv.shape[1], original_cv.shape[0]),
-                )
-
-            # -- Absolutní rozdíl + zesílení (×20) -------------------------
-            diff = cv2.absdiff(original_cv, resaved_cv)
+            # Zesílení (×20)
             ela_image = cv2.multiply(diff, np.array([20.0]))
             ela_image = np.clip(ela_image, 0, 255).astype(np.uint8)
 
@@ -170,7 +169,7 @@ class ForensicAnalyzer:
             # -- Statistiky a detekce podezřelých oblastí ------------------
             gray_diff = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
             max_error = int(np.max(gray_diff))
-            mean_error = float(np.mean(gray_diff))
+            mean_error = float(np.mean(gray_diff))  # type: ignore
 
             suspicious_regions_raw = self._find_suspicious_regions(gray_diff)
             susp_mapped = []
@@ -189,7 +188,7 @@ class ForensicAnalyzer:
         return ELAResult(
             ela_image_path=ela_path,
             max_error=max_error,
-            mean_error=round(mean_error, 4),
+            mean_error=round(float(mean_error), 4),
             suspicious_regions=susp_mapped,
             quality_used=quality
         )
@@ -199,14 +198,14 @@ class ForensicAnalyzer:
         gray_diff: np.ndarray,
         threshold: int = 25,
         min_area: int = 100,
-    ) -> list[dict[str, Any]]:
+    ) -> List[Dict[str, Any]]:
         """Najde spojité oblasti, vrací raw dicty konvertované později v calleru."""
         _, binary = cv2.threshold(gray_diff, threshold, 255, cv2.THRESH_BINARY)
         contours, _ = cv2.findContours(
             binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE,
         )
 
-        regions: list[dict[str, Any]] = []
+        regions: List[Dict[str, Any]] = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
             if area < min_area:
@@ -256,21 +255,21 @@ class ForensicAnalyzer:
             noise_stddev = 0.0
 
         laplacian = cv2.Laplacian(gray, cv2.CV_64F)
-        laplacian_var = float(np.var(laplacian))
+        laplacian_var = float(np.var(laplacian))  # type: ignore
 
         block_size = 64
-        block_stds: list[float] = []
+        block_stds: List[float] = []
         for by in range(0, h - block_size, block_size):
             for bx in range(0, w - block_size, block_size):
                 block = gray[by : by + block_size, bx : bx + block_size]
-                block_stds.append(float(np.std(block)))
+                block_stds.append(float(np.std(block)))  # type: ignore
 
         uniformity_score = 0.0
         if block_stds:
             uniformity_score = float(np.std(block_stds))
 
         score = 0.0
-        reasons: list[str] = []
+        reasons: List[str] = []
 
         if noise_stddev > 5.0:
             score += 0.3
@@ -302,10 +301,10 @@ class ForensicAnalyzer:
         return AIGenResult(
             verdict=verdict,
             confidence=round(confidence, 3),
-            noise_stddev=round(noise_stddev, 4),
-            dark_pixel_ratio=round(dark_pixel_ratio, 4),
-            laplacian_variance=round(laplacian_var, 2),
-            uniformity_score=round(uniformity_score, 2),
+            noise_stddev=round(float(noise_stddev), 4),
+            dark_pixel_ratio=round(float(dark_pixel_ratio), 4),
+            laplacian_variance=round(float(laplacian_var), 2),
+            uniformity_score=round(float(uniformity_score), 2),
             reasons=reasons
         )
 
@@ -354,5 +353,5 @@ class ForensicAnalyzer:
             ela=ela_res,
             ai_generation_check=aigen_res,
             errors=errors,
-            analysis_time_sec=round(elapsed, 3)
+            analysis_time_sec=round(float(elapsed), 3)
         )

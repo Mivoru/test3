@@ -2,13 +2,28 @@ import asyncio
 import os
 import uuid
 import json
-from typing import Dict, Any
+import functools
+from typing import Dict, Any, Optional
+
+# Nacteni .env (bez externich knihoven)
+if os.path.exists(".env"):
+    with open(".env", "r", encoding="utf-8") as env_file:
+        for env_line in env_file:
+            env_line = env_line.strip()
+            if "=" in env_line and not env_line.startswith("#"):
+                env_key, env_val = env_line.split("=", 1)
+                os.environ[env_key.strip()] = env_val.strip()
 
 from fastapi import FastAPI, File, UploadFile, Request, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 import uvicorn
+
+from modules.forensics import ForensicAnalyzer
+from modules.environment import GeoTimeAnalyzer
+from modules.entities import EntityAnalyzer
+from modules.synthesis_engine import SynthesisEngine
 
 app = FastAPI(title="Ultimate OSINT Image Analyzer Dashboard")
 
@@ -19,6 +34,7 @@ os.makedirs("templates", exist_ok=True)
 
 # Připojení statických souborů a šablon
 app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/data", StaticFiles(directory="data"), name="data")
 templates = Jinja2Templates(directory="templates")
 
 # Globální úložiště stavů a WebSocket spojení
@@ -31,7 +47,7 @@ class ProgressManager:
     def __init__(self, task_id: str):
         self.task_id = task_id
         
-    async def update(self, status_msg: str, step: float, data: dict = None):
+    async def update(self, status_msg: str, step: float, data: Optional[dict] = None):
         """Aktualizuje stav a pošle ho klientovi v reálném čase."""
         if self.task_id not in analysis_tasks:
             analysis_tasks[self.task_id] = {"status": status_msg, "progress": step, "data": data or {}}
@@ -54,57 +70,137 @@ class ProgressManager:
             except Exception as e:
                 print(f"Failed to send to WS: {e}")
 
-async def run_analysis_pipeline(task_id: str, file_path: str):
+async def cleanup_files(task_id: str, file_path: str):
     """
-    Simulace spuštění agentů a asynchronních úloh pro demonstraci pipeline.
-    Opravdová integrace zavolá ForensicAnalyzer, GeoTimeAnalyzer apod.
+    Automatické smazání souborů po 1 hodině.
     """
-    pm = ProgressManager(task_id)
-    
+    await asyncio.sleep(3600)
     try:
-        await pm.update("Analyzuji metadata a Exif data...", 10)
-        await asyncio.sleep(1.5) # Simulace zpracování
-        
-        # MOCK DATA from ForensicAnalyzer
-        forensic_data = {
-            "metadata": {"datetime_original": "2023-10-14 12:45:00", "make": "Sony", "model": "A7III"},
-            "ai_generation_check": {"verdict": "authentic", "confidence": 0.98}
-        }
-        await pm.update("Forensics dokončeno. Geolokuji pomocí stínů...", 30, {"forensic": forensic_data})
-        await asyncio.sleep(2)
-        
-        # MOCK DATA from EnvironmentAnalyzer
-        environment_data = {
-            "shadow_analysis": {
-                "candidate_locations": [{"latitude": 50.0755, "longitude": 14.4378}, {"latitude": 48.8566, "longitude": 2.3522}]
-            },
-            "sky_weather_match": {"match": True, "confidence": 0.85, "details": "Oblačnost odpovídá 60% v Praze."}
-        }
-        await pm.update("Geolokace dokončena. Extrahuji entity...", 60, {"environment": environment_data})
-        await asyncio.sleep(1.5)
-        
-        # MOCK DATA from EntityAnalyzer
-        entity_data = {
-            "persons": [{"description": "Osoba v červené bundě", "confidence": 0.92}],
-            "objects": ["Auto", "Dopravní značka"]
-        }
-        await pm.update("Entity identifikovány. Vytvářím syntetickou zprávu...", 80, {"entities": entity_data})
-        await asyncio.sleep(1)
-        
-        # MOCK DATA from SynthesisEngine
-        synthesis_data = {
-            "is_authentic": True,
-            "authenticity_score": 0.95,
-            "final_location": {"latitude": 50.0755, "longitude": 14.4378},
-            "reliability_notes": ["EXIF GPS poloha koresponduje se stínovou analýzou."]
-        }
-        await pm.update("Generuji PDF report...", 90, {"synthesis": synthesis_data})
-        await asyncio.sleep(1)
-        
-        # Zavoláme utils.report_generator na reálná sesbíraná data
-        from utils.report_generator import generate_report
-        report_url = generate_report(task_id, analysis_tasks[task_id].get("data", {}))
+        if os.path.exists(file_path):
+            os.remove(file_path)
+            
+        file_ext = os.path.splitext(file_path)[1]
+        filename = os.path.basename(file_path)
+        ela_path = os.path.join("static", "ela_output", f"ela_{filename}")
+        if not ela_path.lower().endswith((".jpg", ".jpeg", ".png")):
+            ela_path += ".png"
+            
+        if os.path.exists(ela_path):
+            os.remove(ela_path)
+            
+        pdf_path = f"data/reports/{task_id}.pdf"
+        if os.path.exists(pdf_path):
+            os.remove(pdf_path)
+    except Exception as e:
+        print(f"Cleanup error for {task_id}: {e}")
 
+async def run_analysis_pipeline(task_id: str, file_path: str):
+    pm = ProgressManager(task_id)
+    try:
+        from modules.schemas import FullForensicReport, FullEnvironmentReport, EntityAnalyzeResult, FileInfo, SynthesisReport
+        
+        await pm.update("Analyzuji metadata a Exif data...", 10)
+        
+        # 1. Forensics
+        forensic_report = None
+        forensic_data = {}
+        try:
+            forensic_analyzer = ForensicAnalyzer(file_path)
+            forensic_report = await asyncio.to_thread(forensic_analyzer.run_full_analysis)
+            
+            forensic_data = {
+                "metadata": forensic_report.metadata.model_dump() if forensic_report.metadata else {},
+                "ai_generation_check": forensic_report.ai_generation_check.model_dump() if forensic_report.ai_generation_check else {},
+                "ela": forensic_report.ela.model_dump() if forensic_report.ela else {}
+            }
+        except Exception as e:
+            print(f"Forensics chyba: {e}")
+            forensic_report = FullForensicReport(file=FileInfo(path=file_path, filename=os.path.basename(file_path), size_bytes=0), errors=[str(e)])
+        
+        await pm.update("Forensics dokončeno. Geolokuji...", 30, {"forensic": forensic_data})
+        
+        # 2. Environment
+        environment_report = None
+        environment_data = {}
+        try:
+            lat = None
+            lon = None
+            known_datetime = None
+            if forensic_report and forensic_report.metadata:
+                if forensic_report.metadata.gps:
+                    lat = forensic_report.metadata.gps.latitude
+                    lon = forensic_report.metadata.gps.longitude
+                known_datetime = forensic_report.metadata.datetime_original
+
+            geo_analyzer = GeoTimeAnalyzer()
+            
+            def run_env_analysis():
+                return geo_analyzer.full_analysis(
+                    image_path=file_path,
+                    lat=lat,
+                    lon=lon,
+                    known_datetime=known_datetime,
+                    search_api_key=os.environ.get("SERPER_API_KEY"),
+                    weather_api_key=os.environ.get("OPENWEATHER_API_KEY"),
+                    search_engine="serper"
+                )
+                
+            environment_report = await asyncio.to_thread(run_env_analysis)
+            
+            environment_data = {
+                "shadow_analysis": environment_report.shadow_analysis.model_dump() if environment_report.shadow_analysis else {},
+                "sky_weather_match": environment_report.sky_weather_match.model_dump() if environment_report.sky_weather_match else {}
+            }
+        except Exception as e:
+            print(f"Environment chyba: {e}")
+            environment_report = FullEnvironmentReport(image_path=file_path)
+
+        await pm.update("Geolokace dokončena. Extrahuji entity...", 60, {"environment": environment_data})
+        
+        # 3. Entities
+        entities_report = None
+        entity_data = {}
+        try:
+            entity_analyzer = EntityAnalyzer()
+            entities_report = await asyncio.to_thread(entity_analyzer.process_image, file_path)
+            
+            entity_data = {
+                "persons": [p.model_dump() for p in entities_report.persons] if entities_report.persons else [],
+                "objects": entities_report.objects,
+                "texts": entities_report.texts
+            }
+        except Exception as e:
+            print(f"Entities chyba: {e}")
+            entities_report = EntityAnalyzeResult(persons=[], objects=[], texts=[])
+
+        await pm.update("Entity identifikovány. Vytvářím syntetickou zprávu...", 80, {"entities": entity_data})
+        
+        # 4. Synthesis
+        synthesis_report = None
+        synthesis_data = {}
+        try:
+            synthesis_engine = SynthesisEngine()
+            synthesis_report = await asyncio.to_thread(synthesis_engine.run_synthesis, forensic_report, environment_report, entities_report)
+            synthesis_data = synthesis_report.model_dump()
+        except Exception as e:
+            print(f"Synthesis chyba: {e}")
+            synthesis_data = {}
+
+        await pm.update("Generuji PDF report...", 90, {"synthesis": synthesis_data})
+        
+        all_data = {
+            "forensic": forensic_data,
+            "environment": environment_data,
+            "entities": entity_data,
+            "synthesis": synthesis_data
+        }
+        
+        try:
+            from utils.report_generator import generate_report
+            report_url = await asyncio.to_thread(generate_report, task_id, all_data)
+        except Exception as report_err:
+            print(f"Chyba při generování reportu: {report_err}")
+            report_url = None
         
         await pm.update("Analýza dokončena", 100, {"report_url": report_url, "complete": True})
         
@@ -119,7 +215,8 @@ async def get_dashboard(request: Request):
 async def handle_analyze(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
     # Validace
     allowed_extensions = [".jpg", ".jpeg", ".png", ".tiff"]
-    ext = os.path.splitext(file.filename)[1].lower()
+    filename = file.filename or "unknown"
+    ext = os.path.splitext(filename)[1].lower()
     if ext not in allowed_extensions:
         return {"error": "Nepodporovaný formát. Povoleno pouze .jpg, .png, .tiff"}
         
@@ -136,6 +233,7 @@ async def handle_analyze(background_tasks: BackgroundTasks, file: UploadFile = F
     
     # Asynchronní spuštění tasku
     background_tasks.add_task(run_analysis_pipeline, task_id, file_path)
+    background_tasks.add_task(cleanup_files, task_id, file_path)
     
     return {"task_id": task_id, "status": "Task naplánován"}
 

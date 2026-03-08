@@ -45,7 +45,7 @@ def generate_report(task_id: str, analysis_data: dict) -> str:
     if notes:
         elements.append(Paragraph("System Notes:", styles['Heading3']))
         for n in notes:
-            elements.append(Paragraph(f"• {n}", normal_style))
+            elements.append(Paragraph(f"- {n}", normal_style))
         elements.append(Spacer(1, 15))
         
     # Forensics Data

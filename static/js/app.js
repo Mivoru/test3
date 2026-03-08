@@ -220,11 +220,41 @@ document.addEventListener('DOMContentLoaded', () => {
                 metaHtml += `<li><span class="text-terminal-text">TIME:</span> ${data.forensic.metadata.datetime_original || 'UNKNOWN'}</li>`;
                 metaHtml += `<li><span class="text-terminal-text">CAM:</span> ${data.forensic.metadata.make || '-'} / ${data.forensic.metadata.model || '-'}</li>`;
             }
-            if(data.forensic.ai_generation_check) {
-                const aiCol = data.forensic.ai_generation_check.verdict === 'authentic' ? 'text-terminal-green' : 'text-terminal-danger';
+            if(data.forensic.ai_generation_check && data.forensic.ai_generation_check.verdict) {
+                const aiCol = ['authentic', 'likely_authentic'].includes(data.forensic.ai_generation_check.verdict) ? 'text-terminal-green' : 'text-terminal-danger';
                 metaHtml += `<li><span class="text-terminal-text">AI CHECK:</span> <span class="${aiCol}">${data.forensic.ai_generation_check.verdict.toUpperCase()}</span> (${(data.forensic.ai_generation_check.confidence*100).toFixed(1)}%)</li>`;
             }
             if(metaHtml) typeText(forensList, metaHtml);
+            
+            if(data.forensic.ela && data.forensic.ela.ela_image_path) {
+                let webElaPath = data.forensic.ela.ela_image_path.replace(/\\/g, '/');
+                let dataIdx = webElaPath.indexOf('data/ela_output');
+                if(dataIdx !== -1) {
+                    webElaPath = '/' + webElaPath.substring(dataIdx);
+                } else if(!webElaPath.startsWith('/')) {
+                    webElaPath = '/' + webElaPath;
+                }
+                
+                const cEla = document.getElementById('elaCanvas');
+                const pEla = document.getElementById('ela-placeholder');
+                const sEla = document.getElementById('ela-stats');
+                
+                cEla.classList.remove('hidden-el');
+                pEla.classList.add('hidden-el');
+                sEla.classList.remove('hidden-el');
+                
+                document.getElementById('ela-max').textContent = data.forensic.ela.max_error || 0;
+                document.getElementById('ela-sus').textContent = data.forensic.ela.suspicious_regions ? data.forensic.ela.suspicious_regions.length : 0;
+                
+                const ctxEla = cEla.getContext('2d');
+                const img = new Image();
+                img.onload = function() {
+                    cEla.width = img.width;
+                    cEla.height = img.height;
+                    ctxEla.drawImage(img, 0, 0);
+                };
+                img.src = webElaPath;
+            }
             
             // Updating Chart Data
             confChart.data.datasets[0].data[0] = 0.9; // Mock confidence

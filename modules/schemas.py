@@ -8,6 +8,7 @@ class GPSData(BaseModel):
     longitude: float
 
 class MetadataResult(BaseModel):
+    status: Optional[str] = None
     gps: Optional[GPSData] = None
     datetime_original: Optional[str] = None
     make: Optional[str] = None
@@ -134,6 +135,8 @@ class EntityIdentity(BaseModel):
     confidence: float
 
 class EntityAnalyzeResult(BaseModel):
+    status: Optional[str] = None
+    reason: Optional[str] = None
     persons: List[EntityIdentity] = Field(default_factory=list)
     objects: List[str] = Field(default_factory=list)
     texts: List[str] = Field(default_factory=list)
@@ -143,6 +146,7 @@ class EntityAnalyzeResult(BaseModel):
 class SynthesisReport(BaseModel):
     is_authentic: bool
     authenticity_score: float
+    data_availability_index: float
     inconsistencies: List[str]
     final_location: Optional[CandidateLocation] = None
     final_time: Optional[str] = None
